@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LTC Miner | Control Center</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="dashboard-container">
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="logo">
+                <span class="logo-icon">⚡</span>
+                <span class="logo-text">LTC<span class="highlight">Auto</span></span>
+            </div>
+            <ul class="nav-links">
+                <li class="active" data-tab="overview"><a href="javascript:void(0)">Overview</a></li>
+                <li data-tab="transactions"><a href="javascript:void(0)">Transactions</a></li>
+                <li data-tab="calculator"><a href="javascript:void(0)">Calculator</a></li>
+                <li data-tab="settings"><a href="javascript:void(0)">Settings</a></li>
+            </ul>
+            <div class="user-profile">
+                <div class="avatar">W</div>
+                <div class="user-info">
+                    <span class="username">Wallibear</span>
+                    <span class="status">System Administrator</span>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <header class="content-header">
+                <h1 id="pageTitle">Dashboard Overview</h1>
+                <div class="date-display" id="currentDate">May 16, 2026</div>
+            </header>
+
+            <!-- Tab Content: Overview -->
+            <div id="overview-tab" class="tab-content active">
+                <section class="stats-grid">
+                    <div class="stat-card reveal">
+                        <div class="stat-icon">💰</div>
+                        <div class="stat-data">
+                            <span class="label">Total Withdrawn</span>
+                            <span class="value" id="totalWithdrawn">0.00000000 LTC</span>
+                        </div>
+                        <div class="stat-trend positive">+12.5% this week</div>
+                    </div>
+                    <div class="stat-card reveal">
+                        <div class="stat-icon">📈</div>
+                        <div class="stat-data">
+                            <span class="label">Est. Monthly Profit</span>
+                            <span class="value" id="monthlyProfit">0.00 LTC</span>
+                        </div>
+                        <div class="stat-trend">Based on active accounts</div>
+                    </div>
+                    <div class="stat-card reveal">
+                        <div class="stat-icon">🤖</div>
+                        <div class="stat-data">
+                            <span class="label">Active Accounts</span>
+                            <span class="value" id="activeAccounts">0</span>
+                        </div>
+                        <div class="stat-trend neutral">Running perfectly</div>
+                    </div>
+                </section>
+
+                <section class="table-section reveal">
+                    <div class="section-header">
+                        <h2>Recent Payouts</h2>
+                        <button class="btn-primary" onclick="refreshData()">Refresh Data</button>
+                    </div>
+                    <div class="table-container">
+                        <table id="txTable">
+                            <thead>
+                                <tr>
+                                    <th>Account</th>
+                                    <th>Timestamp</th>
+                                    <th>Amount (LTC)</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="txBody"></tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Tab Content: Transactions (Detailed) -->
+            <div id="transactions-tab" class="tab-content">
+                <section class="table-section reveal">
+                    <div class="section-header">
+                        <h2>Full Transaction History</h2>
+                    </div>
+                    <div class="table-container">
+                        <table id="fullTxTable">
+                            <thead>
+                                <tr>
+                                    <th>Account</th>
+                                    <th>Date & Time</th>
+                                    <th>Amount (LTC)</th>
+                                    <th>Proxy Used</th>
+                                </tr>
+                            </thead>
+                            <tbody id="fullTxBody"></tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Tab Content: Calculator -->
+            <div id="calculator-tab" class="tab-content">
+                <section class="calculator-section reveal">
+                    <h2>Earnings Calculator</h2>
+                    <p class="description">Estimate your potential profit based on the number of accounts you deploy.</p>
+                    <div class="calc-grid">
+                        <div class="calc-input">
+                            <label for="accCount">Number of Accounts</label>
+                            <input type="range" id="accCount" min="1" max="1000" value="10">
+                            <div class="range-value"><span id="accCountValue">10</span> Accounts</div>
+                        </div>
+                        <div class="calc-results">
+                            <div class="res-item">
+                                <span class="res-label">Daily Estimate:</span>
+                                <span class="res-value" id="dailyEst">0.0015 LTC</span>
+                            </div>
+                            <div class="res-item highlight">
+                                <span class="res-label">Monthly Estimate:</span>
+                                <span class="res-value" id="monthlyEst">0.0450 LTC</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Tab Content: Settings -->
+            <div id="settings-tab" class="tab-content">
+                <section class="settings-section reveal">
+                    <h2>System Settings</h2>
+                    <div class="settings-grid">
+                        <div class="settings-card">
+                            <h3>Withdrawal Config</h3>
+                            <div class="form-group">
+                                <label>Target LTC Address</label>
+                                <input type="text" id="ltcAddressInput" placeholder="Enter LTC address...">
+                            </div>
+                            <button class="btn-primary" onclick="saveConfig()">Save Changes</button>
+                        </div>
+                        <div class="settings-card">
+                            <h3>Alert Notifications</h3>
+                            <div class="form-group">
+                                <label>Recipient Email</label>
+                                <input type="email" id="alertEmailInput" placeholder="your@email.com">
+                            </div>
+                            <div class="settings-actions">
+                                <button class="btn-secondary" onclick="testEmail()">Test Alert</button>
+                                <div class="status-indicator" id="gmailStatus">
+                                    <span class="dot"></span> Gmail API: Unknown
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# Credentials and sensitive settings
+account.txt
+config.json
+
+# Proxy lists
+proxy.txt
+working_proxies.txt
+working_proxies.txt.bak
+
+# Logs and histories
+transactions.json
+withdraw_history.json
+
+# Screenshots & Node modules
+screenshots/
+node_modules/
