@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const PROXY_FILE = 'proxy.txt';
 const WORKING_FILE = 'working_proxies.txt';
 const TEST_URL = 'https://ltcminer.com';
-const TIMEOUT_MS = 2500; // Aggressive timeout for speed
+const TIMEOUT_MS = 1500; // Ultra-strict timeout for massive speed improvements
 const CONCURRENCY = 2500; // Extremely high concurrency
 
 // Increase max listeners to avoid Node warnings

@@ -80,6 +80,11 @@ async function cleanWorkingProxies() {
     console.log(`[INFO] Created backup at ${backupFile}`);
     console.log(`[INFO] Progressive verification started. Results will be saved to ${WORKING_FILE} in real-time...\n`);
     
+    const targetLimit = parseInt(process.argv[2], 10) || Infinity;
+    if (targetLimit !== Infinity) {
+        console.log(`[INFO] Target limit set: Will stop after finding ${targetLimit} working proxies.`);
+    }
+
     // Clear/truncate the working file to start writing verified proxies progressively
     fs.writeFileSync(WORKING_FILE, '');
     
@@ -87,9 +92,15 @@ async function cleanWorkingProxies() {
     let checkedCount = 0;
     
     for (let i = 0; i < proxies.length; i += CONCURRENCY) {
+        if (workingCount >= targetLimit) {
+            console.log(`\n[INFO] Reached target of ${targetLimit} working proxies. Stopping early!`);
+            break;
+        }
+
         const chunk = proxies.slice(i, i + CONCURRENCY);
         
         const results = await Promise.allSettled(chunk.map(async (proxy) => {
+            if (workingCount >= targetLimit) return { proxy, isWorking: false }; // Skip if already hit limit during concurrent execution
             const isWorking = await checkProxyWithBrowser(proxy);
             return { proxy, isWorking };
         }));
@@ -97,11 +108,11 @@ async function cleanWorkingProxies() {
         for (const result of results) {
             if (result.status === 'fulfilled') {
                 const { proxy, isWorking } = result.value;
-                if (isWorking) {
+                if (isWorking && workingCount < targetLimit) {
                     workingCount++;
                     fs.appendFileSync(WORKING_FILE, proxy + '\n');
                     console.log(`[SUCCESS] ${proxy} (${workingCount} working)`);
-                } else {
+                } else if (!isWorking) {
                     console.log(`[REMOVED] ${proxy}`);
                 }
             }
@@ -111,7 +122,7 @@ async function cleanWorkingProxies() {
         console.log(`[PROGRESS] Checked ${checkedCount} / ${proxies.length} | Active Working: ${workingCount}\n`);
     }
 
-    console.log(`[DONE] Verification complete. Kept ${workingCount} working proxies out of ${proxies.length} in ${WORKING_FILE}.`);
+    console.log(`[DONE] Verification complete. Kept ${workingCount} working proxies in ${WORKING_FILE}.`);
     console.log(`[INFO] If you need to restore the original list, refer to ${backupFile}`);
 }
 

@@ -7,7 +7,23 @@ const PROXY_API_URLS = [
     'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=all&ssl=all&anonymity=all',
     'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
     'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt',
-    'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt'
+    'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
+    'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
+    'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks4.txt',
+    'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt',
+    'https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt',
+    'https://raw.githubusercontent.com/prxchk/proxy-list/main/socks4.txt',
+    'https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt',
+    'https://raw.githubusercontent.com/mertguvencli/http-proxy-list/main/proxy-list/data.txt',
+    'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt',
+    'https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS4_RAW.txt',
+    'https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt',
+    'https://raw.githubusercontent.com/yemixzy/proxy-list/main/proxy-list/data.txt',
+    'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt',
+    'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt',
+    'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt',
+    'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt',
+    'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/all/data.txt'
 ];
 
 async function scrapeProxies() {

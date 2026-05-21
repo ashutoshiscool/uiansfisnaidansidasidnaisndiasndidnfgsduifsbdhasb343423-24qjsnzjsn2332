@@ -116,15 +116,15 @@ function loadProxies() {
     return proxies;
 }
 
-function runAutoScraper() {
+function runAutoScraper(remainingAccounts) {
     console.log('[WARNING] Proxies depleted! Running auto-scraper sequence...');
     try {
         console.log('[INFO] 1/3: Running proxy_scraper.js...');
         execSync('node proxy_scraper.js', { stdio: 'inherit' });
         console.log('[INFO] 2/3: Running proxy_verifier.js (FAST MODE)...');
         execSync('node proxy_verifier.js', { stdio: 'inherit' });
-        console.log('[INFO] 3/3: Running clean_working_proxies.js...');
-        execSync('node clean_working_proxies.js', { stdio: 'inherit' });
+        console.log(`[INFO] 3/3: Running clean_working_proxies.js (Targeting ${remainingAccounts} proxies)...`);
+        execSync(`node clean_working_proxies.js ${remainingAccounts}`, { stdio: 'inherit' });
         console.log('[SUCCESS] Proxy scraping and verification completed.');
     } catch (e) {
         console.error('[ERROR] Failed to scrape fresh proxies automatically:', e.message);
@@ -149,7 +149,7 @@ function runAutoScraper() {
 
         while (accountsCreated < targetAccounts) {
             if (proxies.length === 0) {
-                runAutoScraper();
+                runAutoScraper(targetAccounts - accountsCreated);
                 proxies = loadProxies();
                 if (proxies.length === 0) {
                     console.log('[ERROR] Even after scraping, no proxies are available. Exiting.');
@@ -184,6 +184,16 @@ function runAutoScraper() {
 
             await applyAntiFingerprint(context, fp);
             const page = await context.newPage();
+
+            // Block heavy resources to make slow proxies run 10x faster
+            await page.route('**/*', route => {
+                const type = route.request().resourceType();
+                if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+                    route.abort();
+                } else {
+                    route.continue();
+                }
+            });
 
             try {
                 console.log('[INFO] Navigating to https://ltcminer.com');
@@ -277,9 +287,10 @@ function runAutoScraper() {
 
             } catch (e) {
                 console.error(`[ERROR] Attempt failed: ${e.message}`);
-                // If it's a network failure, we might want to remove the proxy
-                if (e.message.includes('Navigation failed')) {
+                // Aggressively remove proxies that timeout or fail at any stage
+                if (e.message.includes('Navigation failed') || e.message.includes('Timeout') || e.message.includes('closed') || e.message.includes('ERR_')) {
                     proxies = proxies.filter(p => p !== selectedProxy);
+                    console.log(`[INFO] Dropped failing proxy from pool. Remaining proxies: ${proxies.length}`);
                 }
             } finally {
                 await browser.close();
