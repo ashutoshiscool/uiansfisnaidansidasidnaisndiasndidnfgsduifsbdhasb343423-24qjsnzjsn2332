@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const { execSync } = require('child_process');
 const { getRandomFingerprint, applyAntiFingerprint } = require('./fingerprint');
+const { getSms24Number, waitForOtp, markNumberUsed } = require('./number');
+const mail = require('./mail');
 
 const TIMEOUT = 30000;
 const WAIT_HOURS = 25;
@@ -98,68 +100,6 @@ function scrapeFreshProxies() {
 }
 
 // ==========================================
-// SMS24.ME AUTOMATION LOGIC
-// ==========================================
-async function getSms24Number(browser) {
-    const page = await browser.newPage();
-    console.log('[INFO] [SMS] Visiting sms24.me to get a Netherlands number...');
-    await page.goto('https://sms24.me/en/countries/nl', { waitUntil: 'domcontentloaded', timeout: TIMEOUT });
-    await humanDelay(page, 2000, 3000);
-    
-    const numberLinks = page.locator('a[href*="/en/numbers/"]');
-    await numberLinks.first().waitFor({ state: 'visible', timeout: TIMEOUT });
-    
-    const count = await numberLinks.count();
-    if (count === 0) throw new Error("No numbers found on sms24.me");
-    
-    // Pick a number from the top 5
-    const randomIndex = Math.floor(Math.random() * Math.min(count, 5));
-    const targetLink = numberLinks.nth(randomIndex);
-    
-    const href = await targetLink.getAttribute('href');
-    const numberUrl = 'https://sms24.me' + href;
-    
-    // Go to the number's message page
-    await page.goto(numberUrl, { waitUntil: 'domcontentloaded' });
-    await humanDelay(page, 2000, 3000);
-    
-    // The number is typically in an h1 or breadcrumb, but we can extract it from URL
-    const urlParts = numberUrl.split('/');
-    let number = urlParts[urlParts.length - 1];
-    
-    // It might be formatted, e.g. 3197010260270, ensure it starts with + for standard input if needed
-    if (!number.startsWith('+')) number = '+' + number;
-    
-    console.log(`[INFO] [SMS] Selected Number: ${number} | Page: ${numberUrl}`);
-    return { number, numberUrl, smsPage: page };
-}
-
-async function waitForOtp(smsPage, numberUrl) {
-    console.log('[INFO] [SMS] Waiting 20 seconds for LTCminer SMS to arrive...');
-    await humanDelay(smsPage, 20000, 22000);
-    
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        console.log(`[INFO] [SMS] Refreshing SMS page (Attempt ${attempt}/3)...`);
-        await smsPage.goto(numberUrl, { waitUntil: 'domcontentloaded' });
-        await humanDelay(smsPage, 3000, 5000);
-        
-        const bodyText = await smsPage.evaluate(() => document.body.innerText);
-        
-        // Look for: "XXXXXX is your LTCMiner verification code."
-        const match = bodyText.match(/(\d{4,6})\s+is your LTCMiner/i) || 
-                      bodyText.match(/LTCMiner.*?(\d{4,6})/i);
-                      
-        if (match && match[1]) {
-            console.log(`[SUCCESS] [SMS] Extracted OTP: ${match[1]}`);
-            return match[1];
-        }
-        console.log('[INFO] [SMS] OTP not found yet, waiting 10 more seconds...');
-        await humanDelay(smsPage, 10000, 12000);
-    }
-    return null;
-}
-
-// ==========================================
 // MAIN PROCESSING LOGIC
 // ==========================================
 async function processAccount(email, password, assignedProxy) {
@@ -251,78 +191,190 @@ async function processAccount(email, password, assignedProxy) {
         await humanDelay(page, 3000, 5000);
         await clearOverlay(page);
 
-        // Check for restrictions
-        const bodyText = await page.evaluate(() => document.body ? document.body.innerText.toUpperCase() : '');
-        if (bodyText.includes('RESTRICTION') || bodyText.includes('BANNED') || bodyText.includes('VERIFY')) {
-             console.log('[WARNING] ⚠️ ACCOUNT RESTRICTION DETECTED. Trying to bypass or verify...');
-             await page.screenshot({ path: `screenshots/withdraw/restricted_${email.split('@')[0]}.png` });
-             
-             // Check if it's the Phone Verification screen
-             const phoneInput = page.locator('input').filter({ has: page.locator('xpath=..').locator('text=+') }).first().or(page.locator('input[placeholder*="000"]')).first();
-             if (await phoneInput.count() > 0 || bodyText.includes('PHONE NUMBER')) {
-                 console.log('[INFO] Phone verification required! Initiating sms24.me automation...');
-                 
-                 // 1. Pick Country (Netherlands)
-                 try {
-                     const select = page.locator('select').first();
-                     if (await select.count() > 0) {
-                         await select.selectOption({ label: 'Netherlands' });
-                     } else {
-                         const trigger = page.locator('button, [role="combobox"]').filter({ hasText: /Country/i }).first();
-                         await trigger.click({ force: true });
-                         await humanDelay(page, 500, 1000);
-                         await page.getByText('Netherlands', { exact: true }).first().click();
-                     }
-                 } catch(e) {}
-                 
-                 const continueBtn1 = page.getByRole('button', { name: /CONTINUE/i }).first();
-                 await safeClick(page, continueBtn1).catch(() => {});
-                 await humanDelay(page, 1000, 2000);
-                 
-                 // 2. Get SMS Number from sms24.me
-                 let smsData;
-                 try {
-                     // We launch a fresh direct browser for SMS24 to avoid proxy blocks
-                     const smsBrowser = await chromium.launch({ headless: true });
-                     smsData = await getSms24Number(smsBrowser);
-                 } catch(e) {
-                     console.log('[ERROR] Failed to get number from sms24.me:', e.message);
-                     return 'fail';
-                 }
-                 
-                 // 3. Enter number
-                 await safeFill(page, phoneInput, smsData.number);
-                 const sendCodeBtn = page.getByRole('button', { name: /SEND CODE|CONTINUE/i }).last();
-                 await safeClick(page, sendCodeBtn);
-                 await humanDelay(page, 3000, 5000);
-                 
-                 // 4. Wait for OTP
-                 const otp = await waitForOtp(smsData.smsPage, smsData.numberUrl);
-                 await smsData.smsPage.context().browser().close().catch(()=>{}); // Close SMS browser
-                 
-                 if (!otp) {
-                     console.log('[ERROR] OTP did not arrive in time.');
-                     return 'fail';
-                 }
-                 
-                 // 5. Enter OTP
-                 const otpInput = page.locator('input[type="text"]').last();
-                 await safeFill(page, otpInput, otp);
-                 await safeClick(page, page.getByRole('button', { name: /CONTINUE|VERIFY/i }).last());
-                 await humanDelay(page, 5000, 8000);
-                 console.log('[SUCCESS] Phone verified!');
-                 
-                 // Proceed to withdraw
-                 await page.goto('https://ltcminer.com/dashboard', { waitUntil: 'domcontentloaded' });
-                 await humanDelay(page, 3000, 5000);
-             } else {
-                 return 'restricted'; // Hard restricted
-             }
+        // Check for hard bans on dashboard
+        const dashboardText = await page.evaluate(() => document.body ? document.body.innerText.toUpperCase() : '');
+        if (dashboardText.includes('BANNED IMMEDIATELY') || dashboardText.includes('ACCOUNT BANNED') || dashboardText.includes('ACCOUNT RESTRICTIONS DETECTED') || dashboardText.includes('ONLY ONE FREE ACCOUNT IS PERMITTED')) {
+            console.log('[WARNING] ⚠️ ACCOUNT BANNED. Removing from account.txt and skipping.');
+            try {
+                let accounts = fs.readFileSync('account.txt', 'utf-8').split('\n').filter(Boolean);
+                accounts = accounts.filter(line => !line.startsWith(email + ':'));
+                fs.writeFileSync('account.txt', accounts.join('\n') + '\n');
+            } catch(e) {
+                console.error('[ERROR] Failed to remove banned account from account.txt:', e.message);
+            }
+            return 'restricted';
         }
 
         console.log('[INFO] Initiating Withdrawal...');
         const withdrawBtn = page.getByRole('button', { name: /WITHDRAW/i }).first();
         await safeClick(page, withdrawBtn);
+        await humanDelay(page, 2000, 3000);
+
+        // Check if the withdrawal triggered a Phone Verification screen
+        const modalText = await page.evaluate(() => {
+            const modal = document.querySelector('.modal, [role="dialog"]');
+            return modal ? modal.innerText.toUpperCase() : document.body.innerText.toUpperCase();
+        });
+        
+        if (modalText.includes('PHONE VERIFICATION') || modalText.includes('VERIFY YOUR MOBILE NUMBER')) {
+             console.log('[INFO] Phone verification required! Initiating sms24.me automation...');
+             await page.screenshot({ path: `screenshots/withdraw/verify_triggered_${email.split('@')[0]}.png` }).catch(() => {});
+             
+             // 1. Pick Country (Netherlands)
+             try {
+                 const select = page.locator('select').first();
+                 if (await select.count() > 0) {
+                     await select.selectOption({ label: 'Netherlands' });
+                 } else {
+                     const trigger = page.locator('button, [role="combobox"]').filter({ hasText: /Country/i }).first();
+                     await trigger.click({ force: true });
+                     await humanDelay(page, 500, 1000);
+                     await page.getByText('Netherlands', { exact: true }).first().click();
+                 }
+             } catch(e) {}
+             
+             const continueBtn1 = page.getByRole('button', { name: /CONTINUE/i }).first();
+             await safeClick(page, continueBtn1).catch(() => {});
+             await humanDelay(page, 1000, 2000);
+             
+             // 2. Get SMS Number from sms24.me
+             let smsData;
+             try {
+                 const smsBrowser = await chromium.launch({ headless: true });
+                 smsData = await getSms24Number(smsBrowser);
+             } catch(e) {
+                 console.log('[ERROR] Failed to get number from sms24.me:', e.message);
+                 await page.screenshot({ path: `screenshots/withdraw/sms_error_${email.split('@')[0]}.png` }).catch(() => {});
+                 return 'fail';
+             }
+             
+             // 3. Enter number
+             console.log(`[INFO] Entering formatted number: ${smsData.number}`);
+             const phoneInput = page.locator('input[type="tel"], input[placeholder*="phone" i], input').filter({ has: page.locator('xpath=..').locator('text=+') }).first();
+             await safeFill(page, phoneInput, smsData.number);
+             
+             let otp = null;
+             let maxResends = 2; // Try initial + 2 resends
+             
+             for (let attempt = 0; attempt <= maxResends; attempt++) {
+                 if (attempt === 0) {
+                     console.log('[INFO] Clicking SEND CODE to submit phone number...');
+                     await phoneInput.press('Enter'); // Fallback
+                     const sendCodeBtn = page.locator('button, a, span, div, input').filter({ hasText: /SEND CODE|CONTINUE|SUBMIT|SEND/i }).last();
+                     await safeClick(page, sendCodeBtn).catch(() => {});
+                     
+                     // Scroll down the page and any modal to reveal RESEND button
+                     await humanDelay(page, 2000, 3000);
+                     await page.evaluate(() => {
+                         const modal = document.querySelector('.modal, [role="dialog"], .modal-body, .modal-content');
+                         if (modal) modal.scrollTop = modal.scrollHeight;
+                         window.scrollBy(0, 800);
+                     });
+                     await humanDelay(page, 1000, 2000);
+                     
+                     // Take a screenshot so we can debug what's on screen
+                     await page.screenshot({ path: `screenshots/withdraw/after_send_code_${email.split('@')[0]}.png` }).catch(() => {});
+                     
+                     // Check for Email Verification required error
+                     const modalTextAfterSend = await page.evaluate(() => {
+                         const modal = document.querySelector('.modal, [role="dialog"]');
+                         return modal ? modal.innerText.toUpperCase() : document.body.innerText.toUpperCase();
+                     });
+                     
+                     if (modalTextAfterSend.includes('PLEASE VERIFY YOUR ACCOUNT') || modalTextAfterSend.includes('EMAIL SENT')) {
+                         console.log('[WARNING] ⚠️ ACCOUNT REQUIRES EMAIL VERIFICATION. Removing from account.txt and skipping.');
+                         try {
+                             let accounts = fs.readFileSync('account.txt', 'utf-8').split('\n').filter(Boolean);
+                             accounts = accounts.filter(line => !line.startsWith(email + ':'));
+                             fs.writeFileSync('account.txt', accounts.join('\n') + '\n');
+                         } catch(e) {
+                             console.error('[ERROR] Failed to remove unverified account from account.txt:', e.message);
+                         }
+                         
+                         await smsData.smsPage.context().browser().close().catch(()=>{});
+                         return 'restricted';
+                     }
+                     
+                     // Log all buttons on the page for debugging
+                     const allButtons = await page.evaluate(() => {
+                         const btns = document.querySelectorAll('button, a, span, div, p');
+                         return Array.from(btns).map(b => b.innerText.trim()).filter(t => t.length > 0 && t.length < 50);
+                     });
+                     console.log(`[DEBUG] Buttons on page after SEND CODE: ${JSON.stringify(allButtons.slice(0, 20))}`);
+                     
+                     console.log(`[INFO] Forcing immediate RESEND click to trigger OTP...`);
+                     try {
+                         const resendBtn = page.locator('button, a, span, div, p').filter({ hasText: /RESEND/i }).last();
+                         await resendBtn.waitFor({ state: 'attached', timeout: 65000 });
+                         await resendBtn.scrollIntoViewIfNeeded().catch(()=>{});
+                         await resendBtn.click({ force: true });
+                         console.log('[INFO] Clicked initial force RESEND.');
+                     } catch(e) {
+                         console.log('[WARN] Could not find RESEND button during initial force attempt. Error:', e.message.substring(0, 100));
+                     }
+                 } else {
+                     console.log(`[INFO] Clicking RESEND (Attempt ${attempt}/${maxResends})...`);
+                     
+                     // Scroll down again
+                     await page.evaluate(() => {
+                         const modal = document.querySelector('.modal, [role="dialog"], .modal-body, .modal-content');
+                         if (modal) modal.scrollTop = modal.scrollHeight;
+                         window.scrollBy(0, 800);
+                     });
+                     
+                     try {
+                         const resendBtn = page.locator('button, a, span, div, p').filter({ hasText: /RESEND/i }).last();
+                         await resendBtn.waitFor({ state: 'attached', timeout: 65000 });
+                         await resendBtn.scrollIntoViewIfNeeded().catch(()=>{});
+                         await resendBtn.click({ force: true });
+                         console.log(`[INFO] Successfully clicked RESEND (Attempt ${attempt}).`);
+                     } catch(e) {
+                         console.log('[WARN] Could not find RESEND button.');
+                     }
+                 }
+                 
+                 await humanDelay(page, 3000, 5000);
+                 
+                 // 4. Wait for OTP
+                 otp = await waitForOtp(smsData.smsPage, smsData.numberUrl);
+                 
+                 if (otp) {
+                     break; // Got the OTP!
+                 }
+                 console.log('[WARN] OTP failed to arrive.');
+             }
+             
+             await smsData.smsPage.context().browser().close().catch(()=>{}); // Close SMS browser
+             
+             if (!otp) {
+                 console.log(`[ERROR] OTP did not arrive after ${maxResends} resends. Marking number as bad.`);
+                 markNumberUsed(smsData.fullNumber);
+                 await page.screenshot({ path: `screenshots/withdraw/otp_timeout_${email.split('@')[0]}.png` }).catch(() => {});
+                 return 'fail';
+             }
+             
+             // Mark number used since it successfully got an OTP for this account
+             markNumberUsed(smsData.fullNumber);
+             
+             // 5. Enter OTP
+             const otpInput = page.locator('input[type="text"]').last();
+             await safeFill(page, otpInput, otp);
+             await safeClick(page, page.getByRole('button', { name: /CONTINUE|VERIFY/i }).last());
+             await humanDelay(page, 5000, 8000);
+             console.log('[SUCCESS] Phone verified!');
+             
+             // Proceed to withdraw
+             await page.goto('https://ltcminer.com/dashboard', { waitUntil: 'domcontentloaded' });
+             await humanDelay(page, 3000, 5000);
+             console.log('[INFO] Initiating actual withdrawal after verification...');
+             const withdrawBtn2 = page.getByRole('button', { name: /WITHDRAW/i }).first();
+             await safeClick(page, withdrawBtn2);
+             await humanDelay(page, 2000, 3000);
+        }
+
+        console.log('[INFO] Initiating Withdrawal...');
+        const withdrawBtnFinal = page.getByRole('button', { name: /WITHDRAW/i }).first();
+        await safeClick(page, withdrawBtnFinal);
         await humanDelay(page, 2000, 3000);
 
         const maxBtn = page.getByRole('button', { name: /MAX/i }).first();
@@ -356,12 +408,27 @@ async function processAccount(email, password, assignedProxy) {
 
         console.log(`[SUCCESS] Withdrawal completed for ${email}!`);
         
+        // Update account.txt with the working proxy so it doesn't fail next time
+        if (currentProxy !== assignedProxy) {
+            try {
+                let accounts = fs.readFileSync('account.txt', 'utf-8').split('\n').filter(Boolean);
+                const accIndex = accounts.findIndex(line => line.startsWith(email + ':'));
+                if (accIndex !== -1) {
+                    accounts[accIndex] = `${email}:${password}:${currentProxy}`;
+                    fs.writeFileSync('account.txt', accounts.join('\n') + '\n');
+                    console.log(`[INFO] Replaced dead proxy with new working proxy in account.txt for ${email}`);
+                }
+            } catch(e) {
+                console.error('[ERROR] Failed to save new proxy to account.txt:', e.message);
+            }
+        }
+        
         history[email] = new Date().toISOString();
         saveHistory(history);
         return 'success';
 
     } catch (e) {
-        if (e.message.includes('Timeout') || e.message.includes('ERR_')) {
+        if (e.message.includes('Timeout') || e.message.includes('ERR_') || e.message.includes('NS_ERROR_')) {
             console.error(`[ERROR] Network error for ${email}: ${e.message}. Will flag proxy.`);
             return 'proxy_fail';
         }
@@ -391,17 +458,25 @@ async function processAccount(email, password, assignedProxy) {
         if (email && password) {
             let status = await processAccount(email, password, assignedProxy);
             
-            // Auto Fallback logic
-            if (status === 'proxy_fail' || status === 'no_proxies') {
-                console.log(`[WARN] Proxy failed for ${email}. Triggering automatic proxy scrape and retry...`);
-                scrapeFreshProxies();
+            // Auto Fallback logic using existing clean proxies
+            let retries = 0;
+            const maxRetries = 3;
+            
+            while ((status === 'proxy_fail' || status === 'no_proxies') && retries < maxRetries) {
+                retries++;
+                console.log(`[WARN] Proxy failed for ${email}. Retrying with a clean proxy from working_proxies.txt (Attempt ${retries}/${maxRetries})...`);
                 
-                // Retry once with fresh proxies
-                console.log(`[INFO] Retrying ${email} with fresh proxies...`);
-                status = await processAccount(email, password, null);
-                if (status === 'proxy_fail') {
-                    console.log(`[ERROR] Second attempt failed for ${email}. Skipping to next account.`);
+                const proxies = getWorkingProxies();
+                if (proxies.length === 0) {
+                    console.log(`[WARN] No clean proxies left in working_proxies.txt! Triggering full proxy scrape...`);
+                    scrapeFreshProxies();
                 }
+                
+                status = await processAccount(email, password, null); // Passing null forces it to pick a random clean proxy
+            }
+            
+            if (status === 'proxy_fail' || status === 'no_proxies') {
+                console.log(`[ERROR] All ${maxRetries} proxy retries failed for ${email}. Skipping to next account.`);
             }
         }
     }

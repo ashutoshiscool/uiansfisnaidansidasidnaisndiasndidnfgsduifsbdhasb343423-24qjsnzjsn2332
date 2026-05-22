@@ -1,200 +1,165 @@
-const { chromium } = require('playwright');
 const fs = require('fs');
-const { getRandomFingerprint, applyAntiFingerprint } = require('./fingerprint');
 
-const TIMEOUT = 30000; // Increased to 30s
-const RETRIES = 3;
+const USED_NUMBERS_FILE = 'used_numbers.json';
+const SMS_PAGES = [
+    'https://sms24.me/en/countries/nl',
+    'https://sms24.me/en/countries/nl/2',
+    'https://sms24.me/en/countries/nl/3',
+    'https://sms24.me/en/countries/nl/4',
+    'https://sms24.me/en/countries/nl/5'
+];
 
-async function humanDelay(page, min = 1000, max = 2000) {
-    const delay = Math.floor(Math.random() * (max - min + 1) + min);
-    await page.waitForTimeout(delay);
-}
-
-async function safeFill(page, locator, text) {
-    await locator.waitFor({ state: 'visible', timeout: TIMEOUT });
-    await locator.focus();
-    await locator.clear();
-    await humanDelay(page, 200, 500);
-    for (const char of text) {
-        await locator.pressSequentially(char, { delay: Math.floor(Math.random() * 50) + 10 });
+function getUsedNumbers() {
+    if (!fs.existsSync(USED_NUMBERS_FILE)) return [];
+    try {
+        return JSON.parse(fs.readFileSync(USED_NUMBERS_FILE, 'utf-8'));
+    } catch (e) {
+        return [];
     }
 }
 
-async function safeClick(page, locator) {
-    await locator.waitFor({ state: 'visible', timeout: TIMEOUT });
-    await locator.click({ force: true });
+function markNumberUsed(fullNumber) {
+    const used = getUsedNumbers();
+    if (!used.includes(fullNumber)) {
+        used.push(fullNumber);
+        fs.writeFileSync(USED_NUMBERS_FILE, JSON.stringify(used, null, 2));
+        console.log(`[INFO] [SMS] Marked number ${fullNumber} as used.`);
+    }
 }
 
-(async () => {
-    console.log('[INFO] Starting number.js with improved timeout and retries...');
+/**
+ * Opens sms24.me, accepts cookies, scrolls down, and picks a fresh Netherlands number.
+ * Returns { fullNumber, number (without +31), numberUrl, smsPage }
+ */
+async function getSms24Number(smsBrowser) {
+    const usedNumbers = getUsedNumbers();
+    const context = await smsBrowser.newContext();
+    const smsPage = await context.newPage();
 
-    if (!fs.existsSync('account.txt')) {
-        console.error('[ERROR] account.txt not found!');
-        process.exit(1);
-    }
+    for (const smsUrl of SMS_PAGES) {
+        const pageNum = SMS_PAGES.indexOf(smsUrl) + 1;
+        console.log(`[INFO] [SMS] Checking sms24.me page ${pageNum}...`);
 
-    const accounts = fs.readFileSync('account.txt', 'utf-8').split('\n').filter(l => l.trim() !== '');
-    if (accounts.length === 0) {
-        console.error('[ERROR] No accounts in account.txt.');
-        process.exit(1);
-    }
+        await smsPage.goto(smsUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await smsPage.waitForTimeout(2000);
 
-    console.log(`[INFO] Found ${accounts.length} accounts to verify.`);
-
-    for (let i = 0; i < accounts.length; i++) {
-        const accountStr = accounts[i];
-        const parts = accountStr.split(':');
-        if (parts.length < 2) continue;
-
-        const email = parts[0];
-        const password = parts[1];
-
-        console.log(`\n[INFO] ==========================================`);
-        console.log(`[INFO] 🚀 LOGGING INTO: ${email}`);
-        console.log(`[INFO] Account ${i+1} of ${accounts.length}`);
-        console.log(`[INFO] ==========================================`);
-        
-        let success = false;
-        for (let attempt = 1; attempt <= RETRIES && !success; attempt++) {
-            if (attempt > 1) console.log(`[INFO] Retry attempt ${attempt}/${RETRIES} for ${email}...`);
-
-            let launchOptions = { headless: true };
-            const browser = await chromium.launch(launchOptions);
-            const fp = getRandomFingerprint();
-            const context = await browser.newContext({
-                viewport: fp.viewport,
-                userAgent: fp.userAgent,
-                locale: fp.locale,
-                timezoneId: fp.timezoneId
-            });
-            
-            await applyAntiFingerprint(context, fp);
-            const page = await context.newPage();
-
-            try {
-                console.log('[INFO] Navigating to Login page...');
-                await page.goto('https://ltcminer.com', { waitUntil: 'load', timeout: TIMEOUT });
-                
-                console.log('[INFO] Clicking Log In...');
-                const logInBtn = page.locator('button').filter({ hasText: /^Log In$/i }).first();
-                await safeClick(page, logInBtn);
-
-                console.log('[INFO] Filling credentials...');
-                const emailInput = page.locator('input[type="text"][placeholder*="text-slate-400" i], input[type="text"].w-full.h-14').first();
-                await safeFill(page, emailInput, email);
-                await safeFill(page, page.locator('input[type="password"]').first(), password);
-
-                console.log('[INFO] Submitting login...');
-                const submitBtn = page.locator('button').filter({ hasText: /LOG IN/i }).last();
-                await safeClick(page, submitBtn);
-
-                await page.waitForLoadState('networkidle');
-                console.log('[INFO] Navigating to Dashboard...');
-                await page.goto('https://ltcminer.com/dashboard', { waitUntil: 'load', timeout: TIMEOUT }).catch(() => {});
-                await humanDelay(page, 3000, 5000);
-
-                console.log('[INFO] Clicking WITHDRAW...');
-                const withdrawBtn = page.getByRole('button', { name: /WITHDRAW/i }).first();
-                await safeClick(page, withdrawBtn);
-                await humanDelay(page, 2000, 3000);
-
-                // Wait for phone_info.txt
-                console.log('[INFO] Waiting for phone_info.txt (Run ./number.sh now for this account)...');
-                let phoneInfo = null;
-                while (!phoneInfo) {
-                    if (fs.existsSync('phone_info.txt')) {
-                        const content = fs.readFileSync('phone_info.txt', 'utf-8').trim();
-                        if (content.includes(':')) {
-                            phoneInfo = content.split(':');
-                            fs.unlinkSync('phone_info.txt');
-                        }
-                    }
-                    if (!phoneInfo) await new Promise(r => setTimeout(r, 2000));
-                }
-
-                const country = phoneInfo[0].trim();
-                const number = phoneInfo[1].trim();
-                console.log(`[INFO] Selecting country: ${country}, Number: ${number}`);
-
-                try {
-                    const select = page.locator('select').first();
-                    const trigger = page.locator('button, [role="combobox"]').filter({ hasText: /Choose Your Country/i }).first();
-                    
-                    if (await select.count() > 0) {
-                        console.log('[INFO] Using standard select for country...');
-                        await select.selectOption({ label: country });
-                    } else if (await trigger.count() > 0) {
-                        console.log('[INFO] Using custom dropdown trigger...');
-                        await trigger.click({ force: true });
-                        await humanDelay(page, 1000, 2000);
-                        await page.getByText(country, { exact: true }).first().click();
-                    } else {
-                        console.log('[INFO] Attempting fallback country selection...');
-                        const textElement = page.getByText('Choose Your Country').first();
-                        await textElement.click({ force: true });
-                        await humanDelay(page, 1000, 2000);
-                        await page.getByText(country, { exact: true }).first().click();
-                    }
-                } catch (e) {
-                    console.log(`[WARN] Country selection issue: ${e.message}`);
-                }
-
-                console.log('[INFO] Taking debug screenshot after country selection...');
-                await page.screenshot({ path: `debug_country_${email.split('@')[0]}.png`, fullPage: true });
-
-                console.log('[INFO] Clicking CONTINUE...');
-                const continueBtn = page.getByRole('button', { name: /CONTINUE/i }).first();
-                await safeClick(page, continueBtn);
-                await humanDelay(page, 2000, 3000);
-                
-                await page.screenshot({ path: `debug_after_continue_${email.split('@')[0]}.png`, fullPage: true });
-
-                console.log('[INFO] Filling phone number...');
-                // More robust selector for phone input based on placeholder
-                const numInput = page.locator('input').filter({ has: page.locator('xpath=..').locator('text=+') }).first().or(page.locator('input[placeholder*="000"]')).first().or(page.locator('input').last());
-                await safeFill(page, numInput, number);
-                
-                await page.screenshot({ path: `debug_after_number_${email.split('@')[0]}.png`, fullPage: true });
-
-                console.log('[INFO] Clicking SEND CODE...');
-                const sendCodeBtn = page.getByRole('button', { name: /SEND CODE|CONTINUE/i }).last();
-                await safeClick(page, sendCodeBtn);
-                await humanDelay(page, 3000, 5000);
-
-                const screenshotPath = `verify_otp_${email.split('@')[0]}.png`;
-                await page.screenshot({ path: screenshotPath, fullPage: true });
-                console.log(`[INFO] Screenshot saved to ${screenshotPath}`);
-
-                console.log('[INFO] Waiting for OTP from ./number.sh...');
-                let otp = null;
-                while (!otp) {
-                    if (fs.existsSync('otp_info.txt')) {
-                        otp = fs.readFileSync('otp_info.txt', 'utf-8').trim();
-                        fs.unlinkSync('otp_info.txt');
-                    }
-                    if (!otp) await new Promise(r => setTimeout(r, 2000));
-                }
-
-                console.log(`[INFO] Entering OTP: ${otp}`);
-                const otpInput = page.locator('input[type="text"]').last();
-                await safeFill(page, otpInput, otp);
-                
-                await safeClick(page, continueBtn);
-                await humanDelay(page, 5000, 8000);
-                
-                await page.screenshot({ path: `verify_final_${email.split('@')[0]}.png`, fullPage: true });
-                console.log('[INFO] Verification step complete for this account.');
-                success = true;
-
-            } catch (e) {
-                console.error(`[ERROR] Attempt ${attempt} failed for ${email}: ${e.message}`);
-                if (attempt === RETRIES) {
-                    console.error(`[ERROR] All attempts failed for ${email}.`);
-                }
-            } finally {
-                await browser.close();
+        // Accept cookies if present
+        try {
+            const cookieBtn = smsPage.locator('button, a').filter({ hasText: /accept|agree|got it|ok/i }).first();
+            if (await cookieBtn.count() > 0) {
+                await cookieBtn.click({ force: true }).catch(() => {});
+                await smsPage.waitForTimeout(1000);
             }
+        } catch(e) {}
+
+        // Scroll down a bit to load numbers
+        await smsPage.evaluate(() => window.scrollBy(0, 400));
+        await smsPage.waitForTimeout(1000);
+
+        // Find all number links on the page
+        const numbers = await smsPage.evaluate(() => {
+            const links = document.querySelectorAll('a[href*="/numbers/"]');
+            return Array.from(links).map(link => {
+                const text = link.innerText.trim();
+                const phoneMatch = text.match(/(\+31\d+)/);
+                return {
+                    href: link.href,
+                    text: phoneMatch ? phoneMatch[1] : ''
+                };
+            }).filter(n => n.text.startsWith('+31'));
+        });
+
+        for (const num of numbers) {
+            const fullNumber = num.text.replace(/\s/g, '');
+            if (usedNumbers.includes(fullNumber)) {
+                continue; // Skip already used numbers
+            }
+
+            // Found a fresh number!
+            console.log(`[INFO] [SMS] Found fresh, unused Number: ${fullNumber} on page ${pageNum}`);
+
+            // Navigate to the number's SMS page
+            await smsPage.goto(num.href, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await smsPage.waitForTimeout(2000);
+
+            // Format: remove +31 prefix
+            const formattedNumber = fullNumber.replace('+31', '');
+
+            return {
+                fullNumber: fullNumber,
+                number: formattedNumber,
+                numberUrl: num.href,
+                smsPage: smsPage
+            };
         }
     }
-    console.log('\n[INFO] All accounts processed.');
-})();
+
+    throw new Error('No fresh Netherlands numbers available on any sms24.me page!');
+}
+
+/**
+ * Waits for an OTP to arrive on the sms24.me SMS page.
+ * Refreshes the page multiple times and looks for a 4-6 digit code in the latest message.
+ */
+async function waitForOtp(smsPage, numberUrl) {
+    console.log('[INFO] [SMS] Waiting 20 seconds for LTCMiner SMS to arrive...');
+    await smsPage.waitForTimeout(20000);
+
+    for (let attempt = 1; attempt <= 4; attempt++) {
+        console.log(`[INFO] [SMS] Refreshing SMS page (Attempt ${attempt}/4)...`);
+
+        try {
+            await smsPage.reload({ waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch(e) {
+            await smsPage.goto(numberUrl, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+        }
+        await smsPage.waitForTimeout(2000);
+
+        // Look for OTP in the latest SMS messages
+        const otp = await smsPage.evaluate(() => {
+            const messages = document.querySelectorAll('.mess_text, .message-text, td, .msg, pre, .sms-text');
+            for (const msg of messages) {
+                const text = msg.innerText || msg.textContent || '';
+                // Look for 4-6 digit codes
+                const match = text.match(/\b(\d{4,6})\b/);
+                if (match) return match[1];
+            }
+            // Fallback: search entire page body for codes near keywords
+            const body = document.body ? document.body.innerText : '';
+            const codeMatch = body.match(/(?:code|verify|otp|pin)[^\d]*(\d{4,6})/i);
+            if (codeMatch) return codeMatch[1];
+            // Last resort: just find any standalone 4-6 digit number in recent content
+            const allCodes = body.match(/\b(\d{4,6})\b/g);
+            if (allCodes && allCodes.length > 0) {
+                // Check if any code appears near ltcminer or verification text
+                for (const code of allCodes) {
+                    const idx = body.indexOf(code);
+                    const surrounding = body.substring(Math.max(0, idx - 100), idx + 100).toLowerCase();
+                    if (surrounding.includes('ltc') || surrounding.includes('miner') || surrounding.includes('verif') || surrounding.includes('code')) {
+                        return code;
+                    }
+                }
+            }
+            return null;
+        });
+
+        if (otp) {
+            console.log(`[SUCCESS] [SMS] Extracted OTP: ${otp}`);
+            return otp;
+        }
+
+        if (attempt < 4) {
+            console.log('[INFO] [SMS] OTP not found yet, waiting 10 more seconds...');
+            await smsPage.waitForTimeout(10000);
+        }
+    }
+
+    console.log('[ERROR] [SMS] Failed to receive OTP after waiting.');
+    return null;
+}
+
+module.exports = {
+    getSms24Number,
+    waitForOtp,
+    markNumberUsed
+};

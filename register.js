@@ -5,6 +5,7 @@ const { getRandomFingerprint, applyAntiFingerprint } = require('./fingerprint');
 const axios = require('axios');
 const readline = require('readline');
 const { execSync } = require('child_process');
+const mail = require('./mail');
 
 const TIMEOUT = 30000;
 const HUMAN_DELAY_MIN = 100;
@@ -63,7 +64,7 @@ async function clearOverlay(page) {
     const acceptBtn = page.getByRole('button', { name: /ACCEPT/i });
     if (await acceptBtn.count() > 0) {
         console.log('[INFO] Clearing notification overlay...');
-        await acceptBtn.click({ force: true }).catch(() => {});
+        await acceptBtn.click({ force: true }).catch(() => { });
         await humanDelay(page, 1000, 2000);
     }
 }
@@ -106,7 +107,7 @@ function loadProxies() {
             const parts = line.split(':');
             return parts.slice(2).join(':').trim();
         }).filter(p => p);
-        
+
         if (usedProxies.length > 0) {
             const freshProxies = proxies.filter(p => !usedProxies.includes(p));
             console.log(`[INFO] Filtered out ${proxies.length - freshProxies.length} used proxies.`);
@@ -138,13 +139,13 @@ function runAutoScraper(remainingAccounts) {
             console.log('[ERROR] Please enter a valid positive number.');
             process.exit(1);
         }
-        
+
         console.log(`[INFO] Target: ${targetAccounts} accounts.`);
         let accountsCreated = 0;
-        
+
         console.log('[INFO] Starting Registration script with Advanced Stealth...');
         cleanupScreenshots('screenshots/register');
-        
+
         let proxies = loadProxies();
 
         while (accountsCreated < targetAccounts) {
@@ -170,10 +171,10 @@ function runAutoScraper(remainingAccounts) {
 
             const browser = await firefox.launch(launchOptions);
             const fp = getRandomFingerprint();
-            
+
             console.log(`[INFO] Device Profile -> Viewport: ${fp.viewport.width}x${fp.viewport.height}, OS: ${fp.platform}`);
             console.log(`[INFO] Anti-Fingerprint -> WebGL: ${fp.webglRenderer.substring(0, 50)}...`);
-            
+
             const context = await browser.newContext({
                 viewport: fp.viewport,
                 userAgent: fp.userAgent,
@@ -200,29 +201,33 @@ function runAutoScraper(remainingAccounts) {
                 try {
                     await page.goto('https://ltcminer.com', { waitUntil: 'commit', timeout: 15000 });
                     await page.waitForLoadState('domcontentloaded', { timeout: 15000 });
-                    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+                    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => { });
                 } catch (e) {
                     throw new Error(`Navigation failed (${e.message}). Skipping this proxy.`);
                 }
                 await humanDelay(page, 2000, 4000);
                 await clearOverlay(page);
 
-                // Diverse Email Generation
-                const domains = ['zoho.com'];
-                const users = [
-                    randomString(8) + Math.floor(Math.random()*999),
-                    randomString(5) + '.' + randomString(5),
-                    randomString(10),
-                    'user' + Math.floor(Math.random()*100000) + randomString(3)
-                ];
-                const email = users[Math.floor(Math.random()*users.length)] + '@' + domains[0];
+                // Generate Mail.tm Email Account
+                console.log('[INFO] Fetching valid temp mail domain...');
+                const domain = await mail.getDomain();
+                const randomUser = randomString(10);
+                const email = randomUser + '@' + domain;
                 const password = randomPassword();
+                
+                console.log(`[INFO] Creating inbox for ${email}...`);
+                try {
+                    await mail.createAccount(email, password);
+                } catch(e) {
+                    throw new Error(`Failed to create mail.tm account for ${email}. Skipping.`);
+                }
+                
                 console.log(`[INFO] Generated Credentials -> Email: ${email}`);
 
                 console.log('[INFO] Clicking Sign Up...');
                 const signUpBtn = page.locator('button').filter({ hasText: /^Sign Up$/i }).first();
                 await safeClick(page, signUpBtn);
-                
+
                 console.log('[INFO] Waiting for Modal...');
                 const emailInput = page.locator('input[type="text"][placeholder*="text-slate-400" i], input[type="text"].w-full.h-14').first();
                 await emailInput.waitFor({ state: 'visible', timeout: 10000 });
@@ -230,7 +235,7 @@ function runAutoScraper(remainingAccounts) {
 
                 console.log('[INFO] Filling form with human speed...');
                 await safeFill(page, emailInput, email);
-                
+
                 const passInputs = page.locator('input[type="password"]');
                 await safeFill(page, passInputs.nth(0), password);
                 await safeFill(page, passInputs.nth(1), password);
@@ -246,23 +251,59 @@ function runAutoScraper(remainingAccounts) {
 
                 await page.waitForLoadState('networkidle');
                 await humanDelay(page, 5000, 8000);
+                
+                // Polling for email verification link from mail.tm
+                console.log('[INFO] Polling for verification email from mail.tm...');
+                let verifyLink = null;
+                try {
+                    const token = await mail.getToken(email, password);
+                    for (let mailAttempt = 0; mailAttempt < 6; mailAttempt++) {
+                        const messages = await mail.getMessages(token);
+                        if (messages.length > 0) {
+                            const msg = messages[0];
+                            const content = await mail.getMessageContent(token, msg.id);
+                            const bodyText = content.text || content.html || '';
+                            const match = bodyText.match(/https?:\/\/[^\s"'<]+ltcminer[^\s"'<]+/i);
+                            if (match) {
+                                verifyLink = match[0];
+                                console.log(`[SUCCESS] Found verification link: ${verifyLink}`);
+                                break;
+                            }
+                        }
+                        await humanDelay(page, 5000, 5000);
+                    }
+                } catch(e) {
+                    console.error('[ERROR] Failed to check mail.tm inbox:', e.message);
+                }
+
+                if (verifyLink) {
+                    console.log('[INFO] Visiting verification link to activate account...');
+                    const vPage = await context.newPage();
+                    await vPage.goto(verifyLink, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    await humanDelay(vPage, 3000, 5000);
+                    await vPage.screenshot({ path: `screenshots/register/verified_email_${email.split('@')[0]}.png` }).catch(() => {});
+                    await vPage.close();
+                    console.log('[SUCCESS] Email verified successfully during registration!');
+                } else {
+                    console.log('[WARNING] No verification email received during registration. Proceeding anyway.');
+                }
 
                 // Check if restricted immediately
                 const dashboardUrl = 'https://ltcminer.com/dashboard';
                 if (!page.url().includes('/dashboard')) {
                     await page.goto(dashboardUrl, { waitUntil: 'domcontentloaded', timeout: TIMEOUT }).catch(() => null);
-                    await page.waitForLoadState('networkidle').catch(() => {});
+                    await page.waitForLoadState('networkidle').catch(() => { });
                 }
                 await clearOverlay(page);
-                
+
                 if (page.url().includes('/dashboard')) {
                     await humanDelay(page, 2000, 3000); // Wait for dynamic restriction banners to render
-                    
+
                     const isRestricted = await page.evaluate(() => {
                         const text = document.body ? document.body.innerText.toUpperCase() : '';
                         return text.includes('RESTRICTION') || text.includes('BANNED') || text.includes('VERIFY');
                     });
-                    
+
                     if (isRestricted) {
                         console.log('[WARNING] ⚠️ BANNED IMMEDIATELY. Proxy or Fingerprint flagged.');
                         await page.screenshot({ path: `screenshots/register/restricted_${email.split('@')[0]}.png`, fullPage: true });
@@ -271,13 +312,13 @@ function runAutoScraper(remainingAccounts) {
                     } else {
                         console.log('[SUCCESS] ✅ CLEAN ACCOUNT CREATED!');
                         accountsCreated++; // Increment success counter
-                        
+
                         let prefix = '\n';
                         try {
                             const content = fs.readFileSync('account.txt', 'utf-8');
                             if (content.endsWith('\n') || content.length === 0) prefix = '';
-                        } catch(e) {}
-                        
+                        } catch (e) { }
+
                         fs.appendFileSync('account.txt', `${prefix}${email}:${password}:${selectedProxy}\n`);
                         await page.screenshot({ path: `screenshots/register/clean_${email.split('@')[0]}.png`, fullPage: true });
                     }
@@ -296,8 +337,9 @@ function runAutoScraper(remainingAccounts) {
                 await browser.close();
             }
         }
-        
+
         console.log(`\n[SUCCESS] Goal reached! Successfully created ${accountsCreated} accounts.`);
         process.exit(0);
     });
 })();
+
