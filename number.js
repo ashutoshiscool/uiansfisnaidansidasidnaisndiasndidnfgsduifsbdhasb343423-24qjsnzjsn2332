@@ -120,26 +120,20 @@ async function waitForOtp(smsPage, numberUrl) {
             const messages = document.querySelectorAll('.mess_text, .message-text, td, .msg, pre, .sms-text');
             for (const msg of messages) {
                 const text = msg.innerText || msg.textContent || '';
-                // Look for 4-6 digit codes
-                const match = text.match(/\b(\d{4,6})\b/);
-                if (match) return match[1];
-            }
-            // Fallback: search entire page body for codes near keywords
-            const body = document.body ? document.body.innerText : '';
-            const codeMatch = body.match(/(?:code|verify|otp|pin)[^\d]*(\d{4,6})/i);
-            if (codeMatch) return codeMatch[1];
-            // Last resort: just find any standalone 4-6 digit number in recent content
-            const allCodes = body.match(/\b(\d{4,6})\b/g);
-            if (allCodes && allCodes.length > 0) {
-                // Check if any code appears near ltcminer or verification text
-                for (const code of allCodes) {
-                    const idx = body.indexOf(code);
-                    const surrounding = body.substring(Math.max(0, idx - 100), idx + 100).toLowerCase();
-                    if (surrounding.includes('ltc') || surrounding.includes('miner') || surrounding.includes('verif') || surrounding.includes('code')) {
-                        return code;
-                    }
+                
+                // Extremely strict check for the exact LTCMiner format
+                const exactMatch = text.match(/(\d{6})\s+is your LTCMiner/i);
+                if (exactMatch) {
+                    return exactMatch[1];
+                }
+                
+                // Fallback: If it just contains LTC and a 6 digit code
+                if (text.toLowerCase().includes('ltc') && !text.toLowerCase().includes('mistral')) {
+                    const match = text.match(/\b(\d{6})\b/);
+                    if (match) return match[1];
                 }
             }
+            
             return null;
         });
 

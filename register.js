@@ -1,4 +1,4 @@
-const { firefox } = require('playwright');
+const { firefox, chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 const { getRandomFingerprint, applyAntiFingerprint } = require('./fingerprint');
@@ -6,6 +6,7 @@ const axios = require('axios');
 const readline = require('readline');
 const { execSync } = require('child_process');
 const mail = require('./mail');
+const { getSms24Number, waitForOtp, markNumberUsed } = require('./number');
 
 const TIMEOUT = 30000;
 const HUMAN_DELAY_MIN = 100;
@@ -252,42 +253,6 @@ function runAutoScraper(remainingAccounts) {
                 await page.waitForLoadState('networkidle');
                 await humanDelay(page, 5000, 8000);
                 
-                // Polling for email verification link from mail.tm
-                console.log('[INFO] Polling for verification email from mail.tm...');
-                let verifyLink = null;
-                try {
-                    const token = await mail.getToken(email, password);
-                    for (let mailAttempt = 0; mailAttempt < 6; mailAttempt++) {
-                        const messages = await mail.getMessages(token);
-                        if (messages.length > 0) {
-                            const msg = messages[0];
-                            const content = await mail.getMessageContent(token, msg.id);
-                            const bodyText = content.text || content.html || '';
-                            const match = bodyText.match(/https?:\/\/[^\s"'<]+ltcminer[^\s"'<]+/i);
-                            if (match) {
-                                verifyLink = match[0];
-                                console.log(`[SUCCESS] Found verification link: ${verifyLink}`);
-                                break;
-                            }
-                        }
-                        await humanDelay(page, 5000, 5000);
-                    }
-                } catch(e) {
-                    console.error('[ERROR] Failed to check mail.tm inbox:', e.message);
-                }
-
-                if (verifyLink) {
-                    console.log('[INFO] Visiting verification link to activate account...');
-                    const vPage = await context.newPage();
-                    await vPage.goto(verifyLink, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                    await humanDelay(vPage, 3000, 5000);
-                    await vPage.screenshot({ path: `screenshots/register/verified_email_${email.split('@')[0]}.png` }).catch(() => {});
-                    await vPage.close();
-                    console.log('[SUCCESS] Email verified successfully during registration!');
-                } else {
-                    console.log('[WARNING] No verification email received during registration. Proceeding anyway.');
-                }
-
                 // Check if restricted immediately
                 const dashboardUrl = 'https://ltcminer.com/dashboard';
                 if (!page.url().includes('/dashboard')) {
@@ -310,7 +275,148 @@ function runAutoScraper(remainingAccounts) {
                         // Remove proxy from pool so it doesn't get retried
                         proxies = proxies.filter(p => p !== selectedProxy);
                     } else {
-                        console.log('[SUCCESS] ✅ CLEAN ACCOUNT CREATED!');
+                        console.log('[INFO] Account is clean! Proceeding to trigger SMS verification by clicking Withdraw...');
+                        
+                        try {
+                            console.log('[INFO] Initiating Withdrawal click to trigger SMS prompt...');
+                            const withdrawBtn = page.getByRole('button', { name: /WITHDRAW/i }).first();
+                            await safeClick(page, withdrawBtn);
+                            await humanDelay(page, 2000, 3000);
+                            
+                            const modalText = await page.evaluate(() => {
+                                const modal = document.querySelector('.modal, [role="dialog"]');
+                                return modal ? modal.innerText.toUpperCase() : document.body.innerText.toUpperCase();
+                            });
+                            
+                            if (modalText.includes('PHONE VERIFICATION') || modalText.includes('VERIFY YOUR MOBILE NUMBER')) {
+                                console.log('[INFO] Phone verification required! Initiating sms24.me automation...');
+                                await page.screenshot({ path: `screenshots/register/verify_triggered_${email.split('@')[0]}.png` }).catch(() => {});
+                                
+                                // 1. Pick Country (Netherlands)
+                                try {
+                                    const select = page.locator('select').first();
+                                    if (await select.count() > 0) {
+                                        await select.selectOption({ label: 'Netherlands' });
+                                    } else {
+                                        const trigger = page.locator('button, [role="combobox"]').filter({ hasText: /Country/i }).first();
+                                        await trigger.click({ force: true });
+                                        await humanDelay(page, 500, 1000);
+                                        await page.getByText('Netherlands', { exact: true }).first().click();
+                                    }
+                                } catch(e) {}
+                                
+                                const continueBtn1 = page.getByRole('button', { name: /CONTINUE/i }).first();
+                                await safeClick(page, continueBtn1).catch(() => {});
+                                await humanDelay(page, 1000, 2000);
+                                
+                                // 2. Get SMS Number
+                                let smsData;
+                                try {
+                                    const smsBrowser = await chromium.launch({ headless: true });
+                                    smsData = await getSms24Number(smsBrowser);
+                                } catch(e) {
+                                    console.log('[ERROR] Failed to get number from sms24.me:', e.message);
+                                    throw new Error('Failed to get number from sms24.me');
+                                }
+                                
+                                // 3. Enter number
+                                console.log(`[INFO] Entering formatted number: ${smsData.number}`);
+                                const phoneInput = page.locator('input[type="tel"], input[placeholder*="phone" i], input').filter({ has: page.locator('xpath=..').locator('text=+') }).first();
+                                await safeFill(page, phoneInput, smsData.number);
+                                
+                                let otp = null;
+                                let maxResends = 2; // Try initial + 2 resends
+                                
+                                for (let attempt = 0; attempt <= maxResends; attempt++) {
+                                    if (attempt === 0) {
+                                        console.log('[INFO] Clicking SEND CODE to submit phone number...');
+                                        await phoneInput.press('Enter'); // Fallback
+                                        const sendCodeBtn = page.locator('button, a, span, div, input').filter({ hasText: /SEND CODE|CONTINUE|SUBMIT|SEND/i }).last();
+                                        await safeClick(page, sendCodeBtn).catch(() => {});
+                                        
+                                        await humanDelay(page, 2000, 3000);
+                                        await page.evaluate(() => {
+                                            const modal = document.querySelector('.modal, [role="dialog"], .modal-body, .modal-content');
+                                            if (modal) modal.scrollTop = modal.scrollHeight;
+                                            window.scrollBy(0, 800);
+                                        });
+                                        await humanDelay(page, 1000, 2000);
+                                        
+                                        // Take a screenshot so we can debug what's on screen
+                                        await page.screenshot({ path: `screenshots/register/after_send_code_${email.split('@')[0]}.png` }).catch(() => {});
+                                        
+                                        console.log(`[INFO] Forcing immediate RESEND click to trigger OTP...`);
+                                        try {
+                                            const resendBtn = page.locator('button, a, span, div, p').filter({ hasText: /RESEND/i }).last();
+                                            await resendBtn.waitFor({ state: 'attached', timeout: 65000 });
+                                            await resendBtn.scrollIntoViewIfNeeded().catch(()=>{});
+                                            await resendBtn.click({ force: true });
+                                            console.log('[INFO] Clicked initial force RESEND.');
+                                        } catch(e) {
+                                            console.log('[WARN] Could not find RESEND button during initial force attempt.');
+                                        }
+                                    } else {
+                                        console.log(`[INFO] Clicking RESEND (Attempt ${attempt}/${maxResends})...`);
+                                        
+                                        await page.evaluate(() => {
+                                            const modal = document.querySelector('.modal, [role="dialog"], .modal-body, .modal-content');
+                                            if (modal) modal.scrollTop = modal.scrollHeight;
+                                            window.scrollBy(0, 800);
+                                        });
+                                        
+                                        try {
+                                            const resendBtn = page.locator('button, a, span, div, p').filter({ hasText: /RESEND/i }).last();
+                                            await resendBtn.waitFor({ state: 'attached', timeout: 65000 });
+                                            await resendBtn.scrollIntoViewIfNeeded().catch(()=>{});
+                                            await resendBtn.click({ force: true });
+                                            console.log(`[INFO] Successfully clicked RESEND (Attempt ${attempt}).`);
+                                        } catch(e) {
+                                            console.log('[WARN] Could not find RESEND button.');
+                                        }
+                                    }
+                                    
+                                    await humanDelay(page, 3000, 5000);
+                                    
+                                    // 4. Wait for OTP
+                                    otp = await waitForOtp(smsData.smsPage, smsData.numberUrl);
+                                    
+                                    if (otp) {
+                                        break; // Got the OTP!
+                                    }
+                                    console.log('[WARN] OTP failed to arrive.');
+                                }
+                                
+                                await smsData.smsPage.context().browser().close().catch(()=>{}); // Close SMS browser
+                                
+                                if (!otp) {
+                                    console.log(`[ERROR] OTP did not arrive after ${maxResends} resends. Marking number as bad.`);
+                                    markNumberUsed(smsData.fullNumber);
+                                    await page.screenshot({ path: `screenshots/register/otp_timeout_${email.split('@')[0]}.png` }).catch(() => {});
+                                    throw new Error('OTP failed to arrive');
+                                }
+                                
+                                // Mark number used since it successfully got an OTP for this account
+                                markNumberUsed(smsData.fullNumber);
+                                
+                                // 5. Enter OTP
+                                const otpInput = page.locator('input[placeholder*="OTP" i], input[placeholder*="Code" i], input[type="tel"], input[type="text"]').last();
+                                await safeFill(page, otpInput, otp);
+                                await safeClick(page, page.getByRole('button', { name: /CONTINUE|VERIFY/i }).last());
+                                await humanDelay(page, 5000, 8000);
+                                console.log('[SUCCESS] Phone verified during registration!');
+                            } else if (modalText.includes('PLEASE VERIFY YOUR ACCOUNT') || modalText.includes('EMAIL SENT')) {
+                                console.log('[INFO] Email verification requested instead of SMS. Skipping SMS for now.');
+                                // Just log it, we don't handle email here anymore based on instructions.
+                            } else {
+                                console.log('[INFO] No SMS verification prompted upon withdrawal click. Account is clean.');
+                            }
+                        } catch(e) {
+                            console.error('[ERROR] Failed during SMS verification flow:', e.message);
+                            await page.screenshot({ path: `screenshots/register/sms_flow_failed_${email.split('@')[0]}.png`, fullPage: true }).catch(() => {});
+                            throw new Error('SMS Verification Flow Failed. Retrying account creation.');
+                        }
+
+                        console.log('[SUCCESS] ✅ CLEAN & VERIFIED ACCOUNT CREATED!');
                         accountsCreated++; // Increment success counter
 
                         let prefix = '\n';
